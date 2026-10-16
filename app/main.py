@@ -201,3 +201,23 @@ def download_asset(asset_id: int, user=Depends(get_current_user)):
 
 
 
+
+
+# ---------- 9. Legacy-compatible endpoint (Day 11: strangler fig) ----------
+# Replaces the old PHP /tours.php. Existing clients still call /tours.php through
+# the router, so this MUST return exactly the same JSON shape as the PHP version.
+@app.get("/legacy/tours")
+def legacy_tours(hospital: str | None = None):
+    # Safe SQL (placeholders inside db.get_all_tours), unlike the PHP version.
+    tours = db.get_all_tours(limit=100, offset=0, hospital=hospital)
+
+    legacy_list = []
+    for tour in tours:
+        legacy_list.append({
+            "tour_id": tour.id,
+            "hospital_name": tour.hospital,
+            "tour_title": tour.title.upper(),          # PHP used strtoupper(): keep the quirk
+            "is_published": 1 if tour.status == "published" else 0,
+        })
+
+    return {"count": len(legacy_list), "tours": legacy_list}

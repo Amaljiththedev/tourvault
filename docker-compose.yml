@@ -26,6 +26,26 @@ services:
     volumes:
       - storagedata:/data
 
+  # The old system being replaced (Day 11: strangler fig demo).
+  legacy:
+    build: ./legacy-php
+    volumes:
+      - ./legacy-php/app:/var/www/html
+    depends_on:
+      - db
+
+  # Router in front of old + new: clients only use http://localhost:8080
+  router:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./router/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - legacy
+
 volumes:
   pgdata:
   storagedata:
