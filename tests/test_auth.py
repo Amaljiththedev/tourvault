@@ -24,31 +24,55 @@ def test_wrong_password_fails_verification():
 
 
 def test_register_creates_viewer(client):
-    # Act: POST /register with an email and password
-    # Assert: status code is 201
-    # Assert: response.json()["role"] == "viewer"
-    # Assert: "password" is NOT in response.json()       (hint: `not in`)
-    # Assert: "password_hash" is NOT in response.json()
-    ...
+    response = client.post("/register", json={"email": "new@test.com", "password": "pass123"})
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["role"] == "viewer"
+    assert "password" not in body
+    assert "password_hash" not in body
 
 
 def test_register_cannot_choose_admin(client):
-    # Act: POST /register with email, password AND "role": "admin"
-    # Assert: status code is 201
-    # Assert: role in the response is still "viewer"     <- protects your security fix
-    ...
+    response = client.post(
+        "/register",
+        json={"email": "sneaky@test.com", "password": "pass123", "role": "admin"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["role"] == "viewer"  # protects the privilege-escalation fix
 
 
 def test_duplicate_email_returns_409(client):
-    # Arrange: register "dup@test.com" once
-    # Act: register "dup@test.com" again
-    # Assert: the SECOND response has status code 409
-    ...
+    user = {"email": "dup@test.com", "password": "pass123"}
+    client.post("/register", json=user)
+
+    second = client.post("/register", json=user)
+
+    assert second.status_code == 409
 
 
 def test_login_wrong_password_returns_401(client):
-    # Arrange: register a user with password "rightpass"
-    # Act: POST /login with the same email and password "wrongpass"
-    # Assert: status code is 401
-    # Assert: response.json()["detail"] == "Invalid email or password"
-    ...
+    client.post("/register", json={"email": "login@test.com", "password": "rightpass"})
+
+    response = client.post("/login", json={"email": "login@test.com", "password": "wrongpass"})
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid email or password"
+
+
+def test_login_unknown_email_gives_same_401(client):
+    response = client.post("/login", json={"email": "nobody@test.com", "password": "x"})
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid email or password"  # no user enumeration
+
+
+def test_login_returns_token(client):
+    client.post("/register", json={"email": "ok@test.com", "password": "rightpass"})
+
+    response = client.post("/login", json={"email": "ok@test.com", "password": "rightpass"})
+
+    assert response.status_code == 200
+    assert response.json()["token_type"] == "bearer"
+    assert response.json()["access_token"].count(".") == 2  # header.payload.signature
