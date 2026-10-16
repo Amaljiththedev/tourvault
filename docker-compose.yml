@@ -1,0 +1,31 @@
+services:
+  db:
+    image: postgres:15
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tourvault
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+  # S3-compatible object storage. MinIO's public Docker images are no longer
+  # available, so this uses RustFS, a drop-in S3-compatible server.
+  # The same boto3 code works against real AWS S3 by changing the endpoint.
+  storage:
+    image: rustfs/rustfs:latest
+    environment:
+      RUSTFS_ACCESS_KEY: minioadmin
+      RUSTFS_SECRET_KEY: minioadmin
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"   # S3 API (your code talks to this)
+      - "9001:9001"   # web console: http://localhost:9001/rustfs/console/
+    volumes:
+      - storagedata:/data
+
+volumes:
+  pgdata:
+  storagedata:
