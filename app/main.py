@@ -1,10 +1,10 @@
 import os
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from psycopg.errors import UniqueViolation
 
-from app import db, storage
+from app import db, processing, storage
 from app.auth import create_access_token, verify_password, hash_password, get_current_user, require_admin
 from app.models import Asset, TourCreate, Tour, UserCreate, UserOut, UserLogin, Token
 
@@ -121,6 +121,7 @@ MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
 )
 def upload_asset(
     tour_id: int,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     admin=Depends(require_admin)
 ):
@@ -155,8 +156,8 @@ def upload_asset(
         file.content_type
     )
 
-    # 6. Save metadata and return it
-    return db.create_asset(
+    # 6. Save metadata
+    asset = db.create_asset(
         tour_id,
         file.filename,
         object_key,
@@ -165,11 +166,25 @@ def upload_asset(
         admin["id"]
     )
 
+    # 7. Process it in the background AFTER the response is sent:
+    #    the client gets 201 immediately and polls GET /assets/{id} for the status.
+    background_tasks.add_task(processing.process_asset, asset["id"])
+    return asset
+
 
 @app.get("/tours/{tour_id}/assets", response_model=list[Asset])
 def list_tour_assets(tour_id: int, user=Depends(get_current_user)):
     db.get_tour(tour_id)  # 404 if the tour does not exist
     return db.list_assets(tour_id)
+
+
+@app.get("/assets/{asset_id}", response_model=Asset)
+def get_asset_status(asset_id: int, user=Depends(get_current_user)):
+    """Poll this to see processing progress: uploaded -> processing -> ready | failed."""
+    asset = db.get_asset(asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return asset
 
 
 @app.get("/assets/{asset_id}/download")

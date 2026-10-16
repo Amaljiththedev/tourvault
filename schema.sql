@@ -36,5 +36,7 @@ CREATE TABLE IF NOT EXISTS assets (
     status        TEXT NOT NULL DEFAULT 'uploaded'
                   CHECK (status IN ('uploaded', 'processing', 'ready', 'failed')),
     uploaded_by   INTEGER REFERENCES users(id),
+    vertex_count  INTEGER,                    -- filled in by background processing
+    error         TEXT,                       -- why processing failed, if it did
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -54,4 +54,6 @@ class Asset(BaseModel):
     content_type: str | None
     size_bytes: int
     status: str
+    vertex_count: int | None = None
+    error: str | None = None
     created_at: datetime

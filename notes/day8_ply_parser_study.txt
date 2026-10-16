@@ -1,0 +1,103 @@
+DAY 8 STUDY NOTE: parse_ply_vertex_count
+==========================================
+Read this, ask questions, then CLOSE it and type your own version into
+app/processing.py from memory. Do not copy-paste. This file is not part of the app.
+
+
+THE CODE
+--------
+
+def parse_ply_vertex_count(data: bytes) -> int:
+    text = data.decode("utf-8", errors="ignore")      # (1)
+    lines = text.splitlines()                         # (2)
+
+    if not lines or lines[0].strip() != "ply":        # (3)
+        raise ValueError("Not a PLY file")
+
+    for line in lines[1:]:                            # (4)
+        line = line.strip()                           # (5)
+
+        if line == "end_header":                      # (6)
+            break
+
+        if line.startswith("element vertex"):         # (7)
+            parts = line.split()                      # (8)
+            return int(parts[2])                      # (9)
+
+    raise ValueError("No vertex count in header")     # (10)
+
+
+LINE BY LINE
+------------
+
+(1) data.decode("utf-8", errors="ignore")
+    The file arrives as BYTES (raw 0s and 1s). .decode turns bytes into a text string.
+    errors="ignore" means: if some bytes are not valid text (binary PLY files have
+    binary data AFTER the header), skip them instead of crashing.
+
+(2) text.splitlines()
+    Splits the text into a list of lines:
+    "ply\nformat ascii 1.0\n..."  ->  ["ply", "format ascii 1.0", ...]
+
+(3) if not lines or lines[0].strip() != "ply":
+    Two checks joined by `or`:
+      - `not lines`     -> the file was empty (an empty list is "falsy")
+      - lines[0] != "ply" -> the first line is not the PLY magic word
+    The order matters: if the list is empty, lines[0] would CRASH (IndexError).
+    Python stops at the first True in an `or` (short-circuit), so `not lines`
+    protects lines[0].
+
+(4) for line in lines[1:]:
+    lines[1:] means "every line except the first" (we already checked the first).
+    This is called SLICING.
+
+(5) line = line.strip()
+    Removes spaces and newline characters from both ends, so
+    "  element vertex 3  " becomes "element vertex 3".
+
+(6) if line == "end_header": break
+    The header is over. STOP reading. A real 3D scan might have millions of lines
+    of data after this; we never need to look at them. `break` exits the loop.
+
+(7) if line.startswith("element vertex"):
+    Finds the one line we care about, e.g. "element vertex 3".
+
+(8) parts = line.split()
+    .split() with no argument splits on any whitespace:
+    "element vertex 3"  ->  ["element", "vertex", "3"]
+                               [0]       [1]      [2]
+
+(9) return int(parts[2])
+    parts[2] is the TEXT "3". int(...) converts it to the NUMBER 3.
+    `return` exits the function immediately with the answer.
+    (If parts[2] were not a number, int() raises ValueError - which is exactly
+    the kind of error we want for a broken file.)
+
+(10) raise ValueError("No vertex count in header")
+    We only reach this line if the loop finished WITHOUT returning, i.e. we hit
+    end_header (or ran out of lines) and never saw "element vertex".
+
+
+COMPLEXITY (Carl may ask)
+-------------------------
+Time:  O(h) where h = number of HEADER lines (we stop at end_header), not O(file size).
+       (Strictly, decode + splitlines touch the whole input. In production you'd read
+       the file in chunks and stop at end_header so huge files are never fully loaded.)
+Space: O(n) for the decoded text and the list of lines.
+
+
+EDGE CASES TO TEST YOURSELF
+---------------------------
+parse_ply_vertex_count(open("samples/test.ply", "rb").read())   -> 3
+parse_ply_vertex_count(b"")                                       -> ValueError: Not a PLY file
+parse_ply_vertex_count(b"hello")                                  -> ValueError: Not a PLY file
+parse_ply_vertex_count(b"ply\nend_header\n")                      -> ValueError: No vertex count in header
+parse_ply_vertex_count(b"ply\nelement vertex abc\nend_header\n")  -> ValueError (int() fails)
+
+
+QUESTIONS TO ASK YOURSELF BEFORE TYPING IT
+------------------------------------------
+- Why does the empty-file check come BEFORE lines[0]?
+- What does `break` do, and why is it important for big files?
+- What is the difference between `return` inside the loop and the `raise` after it?
+- Why errors="ignore" in decode?

@@ -216,7 +216,7 @@ def create_asset(tour_id: int, filename: str, object_key: str,
             """
             INSERT INTO assets (tour_id, filename, object_key, content_type, size_bytes, uploaded_by)
             VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id, tour_id, filename, object_key, content_type, size_bytes, status, created_at
+            RETURNING id, tour_id, filename, object_key, content_type, size_bytes, status, vertex_count, error, created_at
             """,
             (tour_id, filename, object_key, content_type, size_bytes, uploaded_by),
         ).fetchone()
@@ -226,7 +226,7 @@ def list_assets(tour_id: int):
     with get_db_connection() as conn:
         return conn.execute(
             """
-            SELECT id, tour_id, filename, object_key, content_type, size_bytes, status, created_at
+            SELECT id, tour_id, filename, object_key, content_type, size_bytes, status, vertex_count, error, created_at
             FROM assets
             WHERE tour_id = %s
             ORDER BY id
@@ -239,9 +239,23 @@ def get_asset(asset_id: int):
     with get_db_connection() as conn:
         return conn.execute(
             """
-            SELECT id, tour_id, filename, object_key, content_type, size_bytes, status, created_at
+            SELECT id, tour_id, filename, object_key, content_type, size_bytes, status, vertex_count, error, created_at
             FROM assets
             WHERE id = %s
             """,
             (asset_id,),
         ).fetchone()
+
+
+def update_asset_status(asset_id: int, status: str,
+                        vertex_count: int | None = None, error: str | None = None):
+    """Move an asset through its lifecycle: uploaded -> processing -> ready | failed."""
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE assets
+            SET status = %s, vertex_count = %s, error = %s
+            WHERE id = %s
+            """,
+            (status, vertex_count, error, asset_id),
+        )

@@ -43,3 +43,17 @@ def presigned_download_url(object_key: str, expires_seconds: int = 600) -> str:
         Params={"Bucket": S3_BUCKET, "Key": object_key},
         ExpiresIn=expires_seconds,
     )
+
+
+def read_start(object_key: str, num_bytes: int = 64 * 1024) -> bytes:
+    """Download only the FIRST num_bytes of a file (an HTTP Range request).
+
+    A PLY header is at the very top, so 64 KB is plenty, even for a
+    multi-gigabyte scan. We never download the whole file just to read the header.
+    """
+    response = s3.get_object(
+        Bucket=S3_BUCKET,
+        Key=object_key,
+        Range=f"bytes=0-{num_bytes - 1}",
+    )
+    return response["Body"].read()
