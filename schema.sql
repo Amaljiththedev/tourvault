@@ -4,6 +4,8 @@ CREATE TABLE tours (
     hospital VARCHAR(255) NOT NULL,
     title VARCHAR(255) NOT NULL,
     status VARCHAR(255) NOT NULL,
+    -- Optimistic locking: every update must send the version it read, and bumps it.
+    version INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

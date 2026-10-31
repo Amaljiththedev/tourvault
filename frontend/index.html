@@ -1,0 +1,290 @@
+<!doctype html>
+<!--
+  TourVault demo frontend: one static page served by FastAPI at /app/.
+  Talks to the same API as /docs. Only a thin client: the real work (auth,
+  roles, storage, processing) stays in the backend.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TourVault</title>
+  <style>
+    :root { --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #667085; --line: #e4e7ec; --accent: #2f6fde; --bad: #c4320a; --ok: #12805c; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: var(--card); border-bottom: 1px solid var(--line); }
+    header h1 { font-size: 18px; margin: 0; }
+    main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+    @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+    section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+    h2 { font-size: 15px; margin: 0 0 10px; }
+    input, select, button { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; width: 100%; margin-bottom: 8px; }
+    button { background: var(--accent); color: #fff; border: none; cursor: pointer; }
+    button.secondary { background: #eef2f8; color: var(--text); }
+    button:disabled { opacity: .5; cursor: default; }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li { padding: 8px; border-bottom: 1px solid var(--line); cursor: pointer; }
+    li.active { background: #eef2fb; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .row { display: flex; gap: 8px; }
+    .row > * { flex: 1; }
+    .status-ready { color: var(--ok); } .status-failed { color: var(--bad); }
+    #message { min-height: 22px; font-size: 13px; }
+    #message.error { color: var(--bad); }
+    #viewer { width: 100%; height: 420px; background: #10141c; border-radius: 6px; }
+    .hidden { display: none; }
+  </style>
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    } }
+  </script>
+</head>
+<body>
+  <header>
+    <h1>TourVault</h1>
+    <div><span id="who" class="muted"></span> <button id="logout" class="secondary hidden" style="width:auto">Log out</button></div>
+  </header>
+
+  <main>
+    <div>
+      <section id="auth">
+        <h2>Sign in</h2>
+        <input id="email" type="email" placeholder="Email" autocomplete="username">
+        <input id="password" type="password" placeholder="Password" autocomplete="current-password">
+        <div class="row">
+          <button id="login">Log in</button>
+          <button id="register" class="secondary">Register</button>
+        </div>
+      </section>
+
+      <section id="tours-panel" class="hidden">
+        <h2>Tours</h2>
+        <ul id="tours"></ul>
+        <form id="new-tour" class="hidden" style="margin-top:12px">
+          <h2>New tour (admin)</h2>
+          <input name="hospital" placeholder="Hospital" required>
+          <input name="title" placeholder="Title" required>
+          <select name="status"><option>draft</option><option>published</option></select>
+          <button>Create tour</button>
+        </form>
+      </section>
+      <p id="message"></p>
+    </div>
+
+    <div>
+      <section id="tour-detail" class="hidden">
+        <h2 id="tour-title"></h2>
+        <ul id="assets"></ul>
+        <form id="upload" class="hidden" style="margin-top:12px">
+          <input name="file" type="file" accept=".glb,.ply" required>
+          <button>Upload 3D file (admin)</button>
+        </form>
+      </section>
+      <section style="margin-top:16px">
+        <h2>3D viewer</h2>
+        <div id="viewer"></div>
+        <p class="muted">Drag to rotate, scroll to zoom. Files load straight from storage through a presigned link.</p>
+      </section>
+    </div>
+  </main>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+    import { PLYLoader } from "three/addons/loaders/PLYLoader.js";
+
+    const $ = (id) => document.getElementById(id);
+    let token = null;
+    let role = null;
+    let selectedTour = null;
+
+    // ---------- API helper ----------
+    async function api(path, options = {}) {
+      const headers = options.headers || {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(path, { ...options, headers });
+      const body = response.headers.get("content-type")?.includes("json") ? await response.json() : null;
+      if (!response.ok) {
+        const detail = typeof body?.detail === "string" ? body.detail : `Request failed (${response.status})`;
+        throw new Error(detail);
+      }
+      return body;
+    }
+
+    function say(text, isError = false) {
+      $("message").textContent = text;
+      $("message").className = isError ? "error" : "";
+    }
+
+    // ---------- Auth ----------
+    function credentials() {
+      return JSON.stringify({ email: $("email").value, password: $("password").value });
+    }
+
+    async function logIn() {
+      const data = await api("/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: credentials() });
+      token = data.access_token;
+      // The role is read from the token only to show or hide admin controls.
+      // The server still checks it on every request, so editing it here gains nothing.
+      role = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).role;
+      $("who").textContent = `${$("email").value} (${role})`;
+      $("auth").classList.add("hidden");
+      $("logout").classList.remove("hidden");
+      $("tours-panel").classList.remove("hidden");
+      $("new-tour").classList.toggle("hidden", role !== "admin");
+      $("upload").classList.toggle("hidden", role !== "admin");
+      say("");
+      await loadTours();
+    }
+
+    $("login").onclick = () => logIn().catch((e) => say(e.message, true));
+    $("register").onclick = async () => {
+      try {
+        await api("/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: credentials() });
+        await logIn();
+        say("Registered as a viewer.");
+      } catch (e) { say(e.message, true); }
+    };
+    $("logout").onclick = () => location.reload();
+
+    // ---------- Tours ----------
+    async function loadTours() {
+      const tours = await api("/tours?limit=100");
+      const list = $("tours");
+      list.replaceChildren();
+      for (const tour of tours) {
+        const item = document.createElement("li");
+        // textContent, never innerHTML: titles come from users, so this blocks script injection.
+        item.textContent = `${tour.title} · ${tour.hospital}`;
+        const status = document.createElement("div");
+        status.className = "muted";
+        status.textContent = tour.status;
+        item.append(status);
+        item.classList.toggle("active", tour.id === selectedTour?.id);
+        item.onclick = () => selectTour(tour);
+        list.append(item);
+      }
+      if (!tours.length) list.textContent = "No tours yet.";
+    }
+
+    $("new-tour").onsubmit = async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      try {
+        const tour = await api("/tours", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(Object.fromEntries(form)),
+        });
+        event.target.reset();
+        await loadTours();
+        await selectTour(tour);
+      } catch (e) { say(e.message, true); }
+    };
+
+    async function selectTour(tour) {
+      selectedTour = tour;
+      $("tour-detail").classList.remove("hidden");
+      $("tour-title").textContent = `${tour.title} · ${tour.hospital}`;
+      await loadTours();
+      await loadAssets();
+    }
+
+    // ---------- Assets ----------
+    async function loadAssets() {
+      const assets = await api(`/tours/${selectedTour.id}/assets`);
+      const list = $("assets");
+      list.replaceChildren();
+      for (const asset of assets) {
+        const item = document.createElement("li");
+        item.textContent = `${asset.filename} · ${(asset.size_bytes / 1024).toFixed(1)} KB · `;
+        const status = document.createElement("span");
+        status.className = `status-${asset.status}`;
+        status.textContent = asset.status + (asset.vertex_count != null ? ` (${asset.vertex_count} vertices)` : "");
+        item.append(status);
+        if (asset.error) item.append(` · ${asset.error}`);
+        item.onclick = () => view(asset).catch((e) => say(e.message, true));
+        list.append(item);
+      }
+      if (!assets.length) list.textContent = "No 3D files yet.";
+      // Processing runs in the background: keep polling while anything is unfinished.
+      if (assets.some((a) => a.status === "uploaded" || a.status === "processing")) {
+        setTimeout(() => loadAssets().catch(() => {}), 1500);
+      }
+    }
+
+    $("upload").onsubmit = async (event) => {
+      event.preventDefault();
+      const button = event.target.querySelector("button");
+      button.disabled = true;
+      try {
+        await api(`/tours/${selectedTour.id}/assets`, { method: "POST", body: new FormData(event.target) });
+        event.target.reset();
+        say("Uploaded. Processing in the background...");
+        await loadAssets();
+      } catch (e) { say(e.message, true); }
+      button.disabled = false;
+    };
+
+    // ---------- 3D viewer ----------
+    const container = $("viewer");
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    container.append(renderer.domElement);
+    const scene = new THREE.Scene();
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 2.5));
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
+    camera.position.set(2, 2, 3);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    let current = null;
+
+    function resize() {
+      const { clientWidth: w, clientHeight: h } = container;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener("resize", resize);
+    resize();
+    renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+
+    function show(object) {
+      if (current) scene.remove(current);
+      current = object;
+      scene.add(object);
+      // Centre the model and move the camera back far enough to see all of it.
+      const box = new THREE.Box3().setFromObject(object);
+      const size = box.getSize(new THREE.Vector3()).length() || 1;
+      const centre = box.getCenter(new THREE.Vector3());
+      controls.target.copy(centre);
+      camera.position.copy(centre).add(new THREE.Vector3(size, size * 0.8, size * 1.2));
+      camera.near = size / 100;
+      camera.far = size * 100;
+      camera.updateProjectionMatrix();
+    }
+
+    async function view(asset) {
+      if (asset.status !== "ready") return say("This file is not ready yet.", true);
+      const { url } = await api(`/assets/${asset.id}/download`);
+      say(`Loading ${asset.filename}...`);
+      if (asset.filename.toLowerCase().endsWith(".glb")) {
+        const gltf = await new GLTFLoader().loadAsync(url);
+        show(gltf.scene);
+      } else {
+        const geometry = await new PLYLoader().loadAsync(url);
+        const hasFaces = geometry.index !== null;
+        const material = hasFaces
+          ? new THREE.MeshStandardMaterial({ vertexColors: geometry.hasAttribute("color"), color: 0xdddddd })
+          : new THREE.PointsMaterial({ size: 0.02, vertexColors: geometry.hasAttribute("color"), color: 0x8fb8ff });
+        if (hasFaces) geometry.computeVertexNormals();
+        show(hasFaces ? new THREE.Mesh(geometry, material) : new THREE.Points(geometry, material));
+      }
+      say(`Showing ${asset.filename}.`);
+    }
+  </script>
+</body>
+</html>

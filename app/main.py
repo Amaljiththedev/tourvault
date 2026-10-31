@@ -1,21 +1,53 @@
 import os
+from pathlib import Path
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from psycopg.errors import UniqueViolation
 
 from app import db, processing, storage
 from app.auth import create_access_token, verify_password, hash_password, get_current_user, require_admin
-from app.models import Asset, TourCreate, Tour, UserCreate, UserOut, UserLogin, Token
+from app.models import Asset, TourCreate, TourUpdate, Tour, UserCreate, UserOut, UserLogin, Token
 
 # ---------- 1. Create the app ----------
 app = FastAPI(title="TourVault")
+
+
+# Starlette writes the whole upload to a temp file BEFORE the endpoint runs, so
+# the size check inside upload_asset only happens after a huge file has already
+# been received. This rejects oversized uploads up front, from the declared
+# Content-Length, before any of the body is read.
+MULTIPART_OVERHEAD_BYTES = 64 * 1024  # boundaries and part headers around the file
+
+
+@app.middleware("http")
+async def reject_oversized_uploads(request: Request, call_next):
+    if request.method == "POST" and request.url.path.endswith("/assets"):
+        length = request.headers.get("content-length")
+        if length is None or not length.isdigit():
+            # Without a declared length we cannot refuse early, so require one.
+            return JSONResponse({"detail": "Content-Length required"}, status_code=411)
+        if int(length) > MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES:
+            return JSONResponse({"detail": "File exceeds the maximum upload size"}, status_code=413)
+    return await call_next(request)
 
 
 # ---------- 2. Health check ----------
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# The demo frontend: one static page that calls this same API.
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+app.mount("/app", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/app/")
 
 
 # ---------- 3. Get all tours ----------
@@ -36,25 +68,20 @@ def get_tour(tour_id: int, user=Depends(get_current_user)):
 # ---------- 5. Create a tour ----------
 @app.post("/tours", status_code=201, response_model=Tour)
 def create_tour(tour: TourCreate, admin=Depends(require_admin)):
-    new_tour = db.create_tour(tour)
-    db.log_action(admin["id"], "create", new_tour["id"])
-    return new_tour
+    return db.create_tour(tour, admin["id"])  # tour row + audit row, one transaction
 
 
 # ---------- 6. Update a tour ----------
 @app.put("/tours/{tour_id}", response_model=Tour)
-def update_tour(tour_id: int, tour: TourCreate, admin=Depends(require_admin)):
-    updated_tour = db.update_tour(tour_id, tour)  # raises 404 first if missing, so nothing is logged
-    db.log_action(admin["id"], "update", tour_id)
-    return updated_tour
+def update_tour(tour_id: int, tour: TourUpdate, admin=Depends(require_admin)):
+    # A 404 or 409 rolls back, so nothing is logged. 409 = someone else changed it first.
+    return db.update_tour(tour_id, tour, admin["id"])
 
 
 # ---------- 7. Delete a tour ----------
 @app.delete("/tours/{tour_id}")
 def delete_tour(tour_id: int, admin=Depends(require_admin)):
-    deleted_tour = db.delete_tour(tour_id)
-    db.log_action(admin["id"], "delete", tour_id)
-    return deleted_tour
+    return db.delete_tour(tour_id, admin["id"])
 
 
 
@@ -135,10 +162,12 @@ def upload_asset(
             detail="File extension not allowed"
         )
 
-    # 2. Size check
-    if file.size is not None and file.size > MAX_UPLOAD_BYTES:
+    # 2. Exact size check. file.size is the number of bytes Starlette actually
+    #    received, not a number the client claimed. The middleware above has
+    #    already refused anything whose declared length was too big.
+    if file.size is None or file.size > MAX_UPLOAD_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail="File exceeds the maximum upload size"
         )
 

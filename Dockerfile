@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # The code changes most often, so it is copied last.
 COPY app/ ./app/
+COPY frontend/ ./frontend/
 
 # Run as an unprivileged user: if the app is ever compromised, the attacker
 # is not root inside the container.

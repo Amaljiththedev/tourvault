@@ -10,11 +10,16 @@ class TourCreate(BaseModel):
     title: str
     status: str
 
+class TourUpdate(TourCreate):
+    # The version the client last read. If the tour changed since, the update is refused.
+    version: int
+
 class Tour(BaseModel):
     id: int
     hospital: str
     title: str
     status: str
+    version: int
 
 
 

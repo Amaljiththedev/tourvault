@@ -1,0 +1,45 @@
+# Production stack on EC2: only the API and Postgres.
+# Files go to real S3 (no local storage container), and the API gets S3 access
+# from the EC2 instance role, so there are no access keys anywhere.
+#
+# Run on the server:  docker compose -f docker-compose.prod.yml up -d --build
+# Secrets come from a .env file next to this file, which is never committed.
+services:
+  db:
+    image: postgres:15
+    # No ports published: only the API can reach the database, over the
+    # private compose network.
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: tourvault
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tourvault"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+
+  api:
+    build: .
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/tourvault
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+      # Empty endpoint and keys: boto3 uses real S3 and the instance role.
+      S3_ENDPOINT: ""
+      S3_ACCESS_KEY: ""
+      S3_SECRET_KEY: ""
+      S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET in .env}
+      AWS_REGION: ${AWS_REGION:-eu-west-2}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

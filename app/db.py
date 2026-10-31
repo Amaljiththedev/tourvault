@@ -3,7 +3,7 @@ import os
 import psycopg
 from psycopg.rows import dict_row
 from fastapi import HTTPException
-from app.models import TourCreate, Tour
+from app.models import TourCreate, TourUpdate, Tour
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -25,7 +25,7 @@ def get_all_tours(
     hospital: str | None = None
 ):
     sql = """
-        SELECT id, hospital, title, status, created_at
+        SELECT id, hospital, title, status, version, created_at
         FROM tours
     """
 
@@ -55,7 +55,7 @@ def get_tour(tour_id: int):
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id, hospital, title, status, created_at
+                SELECT id, hospital, title, status, version, created_at
                 FROM tours
                 WHERE id = %s
                 """,
@@ -72,7 +72,12 @@ def get_tour(tour_id: int):
             return tour
 
 
-def create_tour(tour: TourCreate):
+# Tour changes and their audit rows are written on ONE connection, in ONE
+# transaction: the `with conn` block commits only if everything inside succeeds,
+# and rolls back both rows if anything raises. So there is never a change
+# without its audit record, or an audit record for a change that didn't happen.
+
+def create_tour(tour: TourCreate, user_id: int):
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -91,36 +96,47 @@ def create_tour(tour: TourCreate):
                     detail="Tour could not be created"
                 )
 
+            log_action(cursor, user_id, "create", new_tour["id"])
             return new_tour
 
 
-def update_tour(tour_id: int, tour: TourCreate):
+def update_tour(tour_id: int, tour: TourUpdate, user_id: int):
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
+            # Only matches if nobody changed the tour since the client read it.
+            # Check and write happen in one statement, so two admins cannot both pass.
             cursor.execute(
                 """
                 UPDATE tours
                 SET hospital = %s,
                     title = %s,
-                    status = %s
-                WHERE id = %s
+                    status = %s,
+                    version = version + 1
+                WHERE id = %s AND version = %s
                 RETURNING *
                 """,
-                (tour.hospital, tour.title, tour.status, tour_id)
+                (tour.hospital, tour.title, tour.status, tour_id, tour.version)
             )
             updated_tour = cursor.fetchone()
 
             if updated_tour is None:
+                cursor.execute("SELECT 1 FROM tours WHERE id = %s", (tour_id,))
+                if cursor.fetchone() is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Tour not found"
+                    )
                 raise HTTPException(
-                    status_code=404,
-                    detail="Tour not found"
+                    status_code=409,
+                    detail="Tour was changed by someone else; reload it and try again"
                 )
 
+            log_action(cursor, user_id, "update", tour_id)
             return updated_tour
 
 
 
-def delete_tour(tour_id: int):
+def delete_tour(tour_id: int, user_id: int):
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -139,6 +155,7 @@ def delete_tour(tour_id: int):
                     detail="Tour not found"
                 )
 
+            log_action(cursor, user_id, "delete", tour_id)
             return deleted_tour
 
 
@@ -196,15 +213,16 @@ def get_user_by_id(user_id: int):
 
 
 
-def log_action(user_id: int, action: str, tour_id: int | None = None):
-    sql = """
+def log_action(cursor, user_id: int, action: str, tour_id: int | None = None):
+    # Takes the caller's cursor instead of opening its own connection, so the
+    # audit row joins the caller's transaction.
+    cursor.execute(
+        """
         INSERT INTO audit_log (user_id, action, tour_id)
         VALUES (%s, %s, %s)
-    """
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(sql, (user_id, action, tour_id))
+        """,
+        (user_id, action, tour_id)
+    )
 
 
 # ---------- Assets (file metadata; the files themselves live in S3 storage) ----------

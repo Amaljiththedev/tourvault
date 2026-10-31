@@ -6,24 +6,34 @@ only the endpoint and credentials change, set through environment variables.
 import os
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
-S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://localhost:9000")
-S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "minioadmin")
-S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "minioadmin")
+# On AWS these are set to empty strings, which become None: boto3 then uses the
+# real S3 endpoint and its default credential chain, which picks up the EC2
+# instance role, so no access keys are stored anywhere.
+S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://localhost:9000") or None
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "minioadmin") or None
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "minioadmin") or None
 S3_BUCKET = os.getenv("S3_BUCKET", "tour-assets")
+S3_REGION = os.getenv("AWS_REGION", "us-east-1")
 # The address clients use to download. In docker compose the API reaches storage
 # as http://storage:9000, but a browser cannot, and the host is part of the signature.
-S3_PUBLIC_ENDPOINT = os.getenv("S3_PUBLIC_ENDPOINT", S3_ENDPOINT)
+S3_PUBLIC_ENDPOINT = os.getenv("S3_PUBLIC_ENDPOINT", S3_ENDPOINT) or None
 
 
-def _client(endpoint: str):
+def _client(endpoint: str | None):
+    # On real AWS, sign for the regional host (bucket.s3.<region>.amazonaws.com).
+    # Links signed for the global s3.amazonaws.com host fail with
+    # SignatureDoesNotMatch for buckets outside us-east-1.
+    config = Config(s3={"addressing_style": "virtual"}) if endpoint is None else None
     return boto3.client(
         "s3",
         endpoint_url=endpoint,
         aws_access_key_id=S3_ACCESS_KEY,
         aws_secret_access_key=S3_SECRET_KEY,
-        region_name="us-east-1",
+        region_name=S3_REGION,
+        config=config,
     )
 
 
