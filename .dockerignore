@@ -1,0 +1,13 @@
+# Keep the build context small and keep local or secret files out of the image.
+.venv/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+tests/
+samples/
+notes/
+legacy-php/
+router/
+Untitled

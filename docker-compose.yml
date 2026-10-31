@@ -2,7 +2,9 @@ services:
   db:
     image: postgres:15
     ports:
-      - "5432:5432"
+      # Host port 5434, not 5432: other projects' Postgres already use 5432 on
+      # this machine. Containers still reach it as db:5432.
+      - "5434:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -10,6 +12,13 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    # depends_on alone only waits for the container to start. This lets other
+    # services wait until Postgres actually accepts connections.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tourvault"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
 
   # S3-compatible object storage. MinIO's public Docker images are no longer
   # available, so this uses RustFS, a drop-in S3-compatible server.
@@ -26,25 +35,48 @@ services:
     volumes:
       - storagedata:/data
 
+  # The FastAPI app (Day 12). Inside the compose network every service is
+  # reachable by its service name, so the API talks to db and storage by name.
+  api:
+    build: .
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/tourvault
+      S3_ENDPOINT: http://storage:9000
+      # Presigned links are opened by the browser, which cannot resolve
+      # "storage", so they are signed for the address the host can reach.
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      # Local default only. In production SECRET_KEY comes from the environment.
+      SECRET_KEY: ${SECRET_KEY:-dev-only-secret-change-me-at-least-32-bytes}
+    depends_on:
+      db:
+        condition: service_healthy
+      storage:
+        condition: service_started
+
   # The old system being replaced (Day 11: strangler fig demo).
   legacy:
     build: ./legacy-php
     volumes:
       - ./legacy-php/app:/var/www/html
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
-  # Router in front of old + new: clients only use http://localhost:8080
+  # Router in front of old + new: clients only use http://localhost:8088
+  # (not 8080: a Windows Apache service already listens there on this machine).
   router:
     image: nginx:alpine
     ports:
-      - "8080:80"
+      - "8088:80"
     volumes:
       - ./router/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       - legacy
+      - api
 
 volumes:
   pgdata:

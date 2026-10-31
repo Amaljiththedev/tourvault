@@ -10,9 +10,12 @@ import psycopg
 
 # These must be set BEFORE the app is imported, because app/db.py and
 # app/storage.py read them at import time.
-ADMIN_URL = "postgresql://postgres:postgres@localhost:5432/postgres"
+# Host port 5434 matches docker-compose.yml. 127.0.0.1 rather than localhost, so
+# Windows does not try IPv6 first and reach a different Postgres on ::1.
+DB_HOST = os.getenv("TEST_DB_HOST", "127.0.0.1:5434")
+ADMIN_URL = f"postgresql://postgres:postgres@{DB_HOST}/postgres"
 TEST_DB = "tourvault_test"
-os.environ["DATABASE_URL"] = f"postgresql://postgres:postgres@localhost:5432/{TEST_DB}"
+os.environ["DATABASE_URL"] = f"postgresql://postgres:postgres@{DB_HOST}/{TEST_DB}"
 os.environ["S3_BUCKET"] = "tour-assets-test"
 
 import pytest  # noqa: E402

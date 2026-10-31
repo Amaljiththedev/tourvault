@@ -7,7 +7,7 @@ from app.models import TourCreate, Tour
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/tourvault"
+    "postgresql://postgres:postgres@127.0.0.1:5434/tourvault"
 )
 
 

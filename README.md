@@ -8,7 +8,7 @@ I built it to understand the problems behind a "digital front door" product for 
 
 ```mermaid
 flowchart LR
-    client([Client]) --> router[nginx router :8080]
+    client([Client]) --> router[nginx router :8088]
     router -- "/tours.php (migrated)" --> api[FastAPI :8001]
     router -- "everything else" --> php[Legacy PHP app]
     client -- "direct API calls" --> api
@@ -40,18 +40,14 @@ flowchart LR
 
 ## Running it
 
-Requires Docker and Python 3.10 or later (tested on 3.14).
+Requires Docker. Everything, the API included, runs in containers:
 
 ```bash
-docker compose up -d                 # PostgreSQL, S3 storage, legacy PHP, nginx router
-python -m venv .venv
-.venv\Scripts\activate               # Windows (source .venv/bin/activate on macOS/Linux)
-pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --port 8001
+docker compose up -d --build         # API, PostgreSQL, S3 storage, legacy PHP, nginx router
 ```
 
 - API docs: http://127.0.0.1:8001/docs
-- Through the router: http://localhost:8080/tours.php
+- Through the router: http://localhost:8088/tours.php
 - Storage console: http://localhost:9001/rustfs/console/
 
 New users register as viewers. To make an admin locally:
@@ -62,7 +58,12 @@ docker compose exec db psql -U postgres -d tourvault -c "UPDATE users SET role =
 
 ## Tests
 
+Tests run on the host against the compose database (host port 5434):
+
 ```bash
+python -m venv .venv
+.venv\Scripts\activate               # Windows (source .venv/bin/activate on macOS/Linux)
+pip install -r requirements.txt
 python -m pytest
 ```
 
