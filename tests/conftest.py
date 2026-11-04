@@ -17,6 +17,7 @@ ADMIN_URL = f"postgresql://postgres:postgres@{DB_HOST}/postgres"
 TEST_DB = "tourvault_test"
 os.environ["DATABASE_URL"] = f"postgresql://postgres:postgres@{DB_HOST}/{TEST_DB}"
 os.environ["S3_BUCKET"] = "tour-assets-test"
+os.environ["RESUME_ASSETS_ON_STARTUP"] = "0"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -77,5 +78,5 @@ def admin_headers(client):
 @pytest.fixture
 def viewer_headers(client):
     """Authorization header for a logged-in VIEWER."""
-    _make_user("viewer@test.com", "viewerpass", "viewer")
-    return {"Authorization": f"Bearer {_token(client, 'viewer@test.com', 'viewerpass')}"}
+    _make_user("viewer@test.com", "viewerpass1", "viewer")
+    return {"Authorization": f"Bearer {_token(client, 'viewer@test.com', 'viewerpass1')}"}

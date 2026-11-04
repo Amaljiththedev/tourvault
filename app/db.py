@@ -169,7 +169,7 @@ def create_user(email: str, password_hash: str, role: str = "viewer"):
                 VALUES (%s, %s, %s)
                 RETURNING id, email, role, created_at
                 """,
-                (email, password_hash, role)
+                (email.strip().lower(), password_hash, role)
             )
 
             user = cursor.fetchone()
@@ -183,9 +183,9 @@ def get_user_by_email(email: str):
                 """
                 SELECT id, email, password_hash, role, created_at
                 FROM users
-                WHERE email = %s
+                WHERE lower(email) = lower(%s)
                 """,
-                (email,)
+                (email.strip(),)
             )
 
             user = cursor.fetchone()
@@ -277,3 +277,45 @@ def update_asset_status(asset_id: int, status: str,
             """,
             (status, vertex_count, error, asset_id),
         )
+
+
+def list_unfinished_asset_ids() -> list[int]:
+    """Assets left in 'uploaded' or 'processing', e.g. because the server
+    restarted while a background job was running. Used to resume them."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT id FROM assets WHERE status IN ('uploaded', 'processing') ORDER BY id"
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+
+def claim_asset_for_processing(asset_id: int) -> bool:
+    """Atomically move an asset to 'processing'. Returns False if another job
+    already holds it or it is finished, so the same file is never processed twice."""
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            UPDATE assets
+            SET status = 'processing', error = NULL
+            WHERE id = %s AND status = 'uploaded'
+            RETURNING id
+            """,
+            (asset_id,),
+        ).fetchone()
+        return row is not None
+
+
+def reset_asset_for_reprocessing(asset_id: int) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE assets SET status = 'uploaded', vertex_count = NULL, error = NULL WHERE id = %s",
+            (asset_id,),
+        )
+
+
+def delete_asset(asset_id: int):
+    with get_db_connection() as conn:
+        return conn.execute(
+            "DELETE FROM assets WHERE id = %s RETURNING id, object_key",
+            (asset_id,),
+        ).fetchone()

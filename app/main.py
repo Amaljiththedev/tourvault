@@ -1,18 +1,42 @@
+import logging
 import os
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from psycopg.errors import UniqueViolation
 
 from app import db, processing, storage
-from app.auth import create_access_token, verify_password, hash_password, get_current_user, require_admin
-from app.models import Asset, TourCreate, TourUpdate, Tour, UserCreate, UserOut, UserLogin, Token
+from app.auth import ACCESS_TOKEN_MINUTES, authenticate, create_access_token, get_current_user, hash_password, require_admin
+from app.models import Asset, Token, Tour, TourCreate, TourUpdate, UserCreate, UserLogin, UserOut
+
+log = logging.getLogger("tourvault")
+
 
 # ---------- 1. Create the app ----------
-app = FastAPI(title="TourVault")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Resume assets a previous run left half-processed. Runs in a thread so a
+    # slow storage call never delays startup; set RESUME_ASSETS_ON_STARTUP=0 to skip.
+    if os.getenv("RESUME_ASSETS_ON_STARTUP", "1") == "1":
+        def resume():
+            try:
+                count = processing.resume_unfinished_assets()
+                if count:
+                    log.info("Resumed %d unfinished asset(s)", count)
+            except Exception:
+                log.exception("Could not resume unfinished assets")
+        threading.Thread(target=resume, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="TourVault", lifespan=lifespan)
 
 
 # Starlette writes the whole upload to a temp file BEFORE the endpoint runs, so
@@ -32,6 +56,17 @@ async def reject_oversized_uploads(request: Request, call_next):
         if int(length) > MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES:
             return JSONResponse({"detail": "File exceeds the maximum upload size"}, status_code=413)
     return await call_next(request)
+
+
+# Added after the middleware above, so it wraps it: even a 411/413 refusal
+# carries CORS headers and the browser can read the error message.
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 # ---------- 2. Health check ----------
@@ -81,7 +116,16 @@ def update_tour(tour_id: int, tour: TourUpdate, admin=Depends(require_admin)):
 # ---------- 7. Delete a tour ----------
 @app.delete("/tours/{tour_id}")
 def delete_tour(tour_id: int, admin=Depends(require_admin)):
-    return db.delete_tour(tour_id, admin["id"])
+    # Asset rows go with the tour (ON DELETE CASCADE), but their files live in
+    # storage, so note the keys first and remove the files once the delete commits.
+    object_keys = [asset["object_key"] for asset in db.list_assets(tour_id)]
+    deleted = db.delete_tour(tour_id, admin["id"])
+    for key in object_keys:
+        try:
+            storage.delete_file(key)
+        except Exception:
+            log.exception("Could not delete object %s", key)
+    return deleted
 
 
 
@@ -105,37 +149,42 @@ def register(user: UserCreate):
             detail="Email already registered"
         )
 
-@app.post("/login", response_model=Token)
-def login(user: UserLogin):
-    db_user = db.get_user_by_email(user.email)
-
-    if (
-        db_user is None
-        or not verify_password(
-            user.password,
-            db_user["password_hash"]
-        )
-    ):
+def _issue_token(email: str, password: str) -> dict:
+    db_user = authenticate(email, password)
+    if db_user is None:
+        # Same message for a wrong email and a wrong password: no user enumeration.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
         )
+    token = create_access_token({"sub": str(db_user["id"]), "role": db_user["role"]})
+    return {"access_token": token, "token_type": "bearer", "expires_in": ACCESS_TOKEN_MINUTES * 60}
 
-    token = create_access_token(
-        {
-            "sub": str(db_user["id"]),
-            "role": db_user["role"]
-        }
-    )
 
-    return {
-        "access_token": token,
-        "token_type": "bearer"
-    }
+@app.post("/login", response_model=Token)
+def login(user: UserLogin):
+    return _issue_token(user.email, user.password)
+
+
+@app.post("/token", response_model=Token, include_in_schema=False)
+def token_for_docs(form: OAuth2PasswordRequestForm = Depends()):
+    # Form-encoded twin of /login for the Authorize button in /docs.
+    if not form.password:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+    return _issue_token(form.username.strip().lower(), form.password)
+
+
+@app.get("/me", response_model=UserOut)
+def me(user=Depends(get_current_user)):
+    # Lets the frontend check a stored token is still valid and get the real role.
+    return user
 
 
 # ---------- 8. 3D assets ----------
 ALLOWED_EXTENSIONS = {".glb", ".ply"}
+# Browsers send no type or a generic one for 3D files, so the server sets it.
+CONTENT_TYPES = {".glb": "model/gltf-binary", ".ply": "application/octet-stream"}
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
 
 
@@ -170,6 +219,8 @@ def upload_asset(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail="File exceeds the maximum upload size"
         )
+    if file.size == 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File is empty")
 
     # 3. Tour must exist (raises 404 if missing)
     db.get_tour(tour_id)
@@ -179,18 +230,15 @@ def upload_asset(
 
     # 5. Upload file to storage
     storage.ensure_bucket()
-    storage.upload_file(
-        file.file,
-        object_key,
-        file.content_type
-    )
+    content_type = CONTENT_TYPES[ext]
+    storage.upload_file(file.file, object_key, content_type)
 
     # 6. Save metadata
     asset = db.create_asset(
         tour_id,
         file.filename,
         object_key,
-        file.content_type,
+        content_type,
         file.size,
         admin["id"]
     )
@@ -223,7 +271,33 @@ def download_asset(asset_id: int, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Asset not found")
     # A temporary signed link: the browser downloads straight from storage,
     # so large 3D files never pass through this API.
+    if asset["status"] != "ready":
+        raise HTTPException(status_code=409, detail="Asset is not ready yet")
     return {"url": storage.presigned_download_url(asset["object_key"]), "expires_in_seconds": 600}
+
+
+@app.post("/assets/{asset_id}/reprocess", response_model=Asset)
+def reprocess_asset(asset_id: int, background_tasks: BackgroundTasks, admin=Depends(require_admin)):
+    asset = db.get_asset(asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if asset["status"] == "processing":
+        raise HTTPException(status_code=409, detail="Asset is already being processed")
+    db.reset_asset_for_reprocessing(asset_id)
+    background_tasks.add_task(processing.process_asset, asset_id)
+    return db.get_asset(asset_id)
+
+
+@app.delete("/assets/{asset_id}", status_code=204)
+def delete_asset(asset_id: int, admin=Depends(require_admin)):
+    deleted = db.delete_asset(asset_id)
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    try:
+        storage.delete_file(deleted["object_key"])
+    except Exception:
+        # The metadata is gone either way; an orphaned object costs storage, not correctness.
+        log.exception("Could not delete object %s", deleted["object_key"])
 
 
 

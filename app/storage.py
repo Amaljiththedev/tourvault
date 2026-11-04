@@ -76,3 +76,7 @@ def read_start(object_key: str, num_bytes: int = 64 * 1024) -> bytes:
         Range=f"bytes=0-{num_bytes - 1}",
     )
     return response["Body"].read()
+
+
+def delete_file(object_key: str) -> None:
+    s3.delete_object(Bucket=S3_BUCKET, Key=object_key)

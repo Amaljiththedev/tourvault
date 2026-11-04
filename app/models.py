@@ -1,18 +1,28 @@
-from pydantic import BaseModel, EmailStr
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
+from pydantic import BaseModel, EmailStr, Field, StringConstraints, field_validator
 
+# bcrypt only looks at the first 72 bytes of a password, and bcrypt 5 raises an
+# error for anything longer. So the API refuses longer passwords up front
+# instead of crashing with a 500 or silently ignoring the end of the password.
+BCRYPT_MAX_BYTES = 72
+MIN_PASSWORD_LENGTH = 8
+
+TourStatus = Literal["draft", "published"]
+NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
 
 
 class TourCreate(BaseModel):
-    hospital: str
-    title: str
-    status: str
+    hospital: NonEmptyText
+    title: NonEmptyText
+    status: TourStatus
+
 
 class TourUpdate(TourCreate):
     # The version the client last read. If the tour changed since, the update is refused.
     version: int
+
 
 class Tour(BaseModel):
     id: int
@@ -20,17 +30,32 @@ class Tour(BaseModel):
     title: str
     status: str
     version: int
+    created_at: datetime | None = None
 
 
-
-
-
+def _normalise_email(value: str) -> str:
+    # One account per address, whatever case it is typed in.
+    return value.strip().lower()
 
 
 class UserCreate(BaseModel):
     # No `role` here on purpose: the client must never choose its own permissions.
     email: EmailStr
-    password: str
+    password: str = Field(min_length=MIN_PASSWORD_LENGTH)
+
+    @field_validator("email")
+    @classmethod
+    def normalise_email(cls, value: str) -> str:
+        return _normalise_email(value)
+
+    @field_validator("password")
+    @classmethod
+    def password_rules(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Password cannot be blank")
+        if len(value.encode("utf-8")) > BCRYPT_MAX_BYTES:
+            raise ValueError(f"Password must be at most {BCRYPT_MAX_BYTES} bytes")
+        return value
 
 
 class UserOut(BaseModel):
@@ -43,12 +68,20 @@ class UserOut(BaseModel):
 
 class UserLogin(BaseModel):
     email: EmailStr
-    password: str
+    # min_length=1: an empty password is never a valid login, even for an old
+    # account that was created before the registration rules existed.
+    password: str = Field(min_length=1)
+
+    @field_validator("email")
+    @classmethod
+    def normalise_email(cls, value: str) -> str:
+        return _normalise_email(value)
 
 
 class Token(BaseModel):
     access_token: str
     token_type: str
+    expires_in: int
 
 
 class Asset(BaseModel):
