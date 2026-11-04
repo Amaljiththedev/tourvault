@@ -92,11 +92,13 @@ def glb_vertex_count(asset: dict, start: bytes) -> int:
 
 def process_asset(asset_id: int) -> None:
     """Runs in the background after an upload. Never raises: failures are recorded."""
+    # Claim the asset first: only one job may move it from 'uploaded' to
+    # 'processing'. If the claim fails, another job has it or it is finished.
+    if not db.claim_asset_for_processing(asset_id):
+        return
     asset = db.get_asset(asset_id)
     if asset is None:
         return
-
-    db.update_asset_status(asset_id, "processing")
 
     try:
         header_bytes = storage.read_start(asset["object_key"])
@@ -109,4 +111,15 @@ def process_asset(asset_id: int) -> None:
         db.update_asset_status(asset_id, "ready", vertex_count=vertex_count)
 
     except Exception as exc:  # any problem -> mark failed with a readable reason
-        db.update_asset_status(asset_id, "failed", error=str(exc))
+        db.update_asset_status(asset_id, "failed", error=str(exc)[:500] or type(exc).__name__)
+
+
+def resume_unfinished_assets() -> int:
+    """Run at startup. Background tasks live in memory, so a restart loses any
+    that were queued or running and those assets would sit in 'uploaded' or
+    'processing' forever. This puts them back in the queue."""
+    ids = db.list_unfinished_asset_ids()
+    for asset_id in ids:
+        db.reset_asset_for_reprocessing(asset_id)
+        process_asset(asset_id)
+    return len(ids)

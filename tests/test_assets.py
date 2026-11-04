@@ -2,6 +2,7 @@
 import pytest
 
 from app import main
+from app.processing import process_asset as real_process_asset  # before any fixture stubs it
 
 TOUR = {"hospital": "Alder Hey", "title": "Entrance", "status": "draft"}
 
@@ -63,3 +64,70 @@ def test_upload_without_content_length_is_refused(client, admin_headers, tour_id
 
     assert response.status_code == 411
     assert fake_storage == []
+
+
+def test_empty_file_is_refused(client, admin_headers, tour_id, fake_storage):
+    response = client.post(f"/tours/{tour_id}/assets", files={"file": ("empty.ply", b"")}, headers=admin_headers)
+    assert response.status_code == 400
+    assert fake_storage == []
+
+
+def test_server_sets_content_type(client, admin_headers, tour_id, fake_storage):
+    response = client.post(
+        f"/tours/{tour_id}/assets",
+        files={"file": ("model.glb", b"glTF" + b"0" * 100, "text/plain")},
+        headers=admin_headers,
+    )
+    assert response.json()["content_type"] == "model/gltf-binary"
+
+
+def test_download_refused_until_ready(client, admin_headers, tour_id, fake_storage):
+    asset = client.post(f"/tours/{tour_id}/assets", files={"file": ("scan.ply", b"ply\n")}, headers=admin_headers).json()
+    assert client.get(f"/assets/{asset['id']}/download", headers=admin_headers).status_code == 409
+
+
+def test_stuck_asset_is_resumed(client, admin_headers, tour_id, fake_storage, monkeypatch):
+    from app import db, processing
+    asset = client.post(f"/tours/{tour_id}/assets", files={"file": ("scan.ply", b"ply\n")}, headers=admin_headers).json()
+    db.update_asset_status(asset["id"], "processing")  # as if the server died mid-job
+    monkeypatch.setattr(processing, "process_asset", real_process_asset)
+
+    monkeypatch.setattr(processing.storage, "read_start", lambda key, n=0: b"ply\nelement vertex 42\nend_header\n")
+    assert processing.resume_unfinished_assets() == 1
+
+    resumed = db.get_asset(asset["id"])
+    assert resumed["status"] == "ready"
+    assert resumed["vertex_count"] == 42
+
+
+def test_process_asset_runs_only_once(client, admin_headers, tour_id, fake_storage, monkeypatch):
+    from app import db, processing
+    asset = client.post(f"/tours/{tour_id}/assets", files={"file": ("scan.ply", b"ply\n")}, headers=admin_headers).json()
+    calls = []
+    monkeypatch.setattr(processing, "process_asset", real_process_asset)
+    monkeypatch.setattr(processing.storage, "read_start", lambda key, n=0: calls.append(key) or b"ply\nelement vertex 1\nend_header\n")
+
+    processing.process_asset(asset["id"])
+    processing.process_asset(asset["id"])  # second call finds it already done
+
+    assert len(calls) == 1
+
+
+def test_reprocess_and_delete_need_admin(client, admin_headers, viewer_headers, tour_id, fake_storage, monkeypatch):
+    monkeypatch.setattr(main.storage, "delete_file", lambda key: None)
+    asset = client.post(f"/tours/{tour_id}/assets", files={"file": ("scan.ply", b"ply\n")}, headers=admin_headers).json()
+
+    assert client.post(f"/assets/{asset['id']}/reprocess", headers=viewer_headers).status_code == 403
+    assert client.post(f"/assets/{asset['id']}/reprocess", headers=admin_headers).status_code == 200
+    assert client.delete(f"/assets/{asset['id']}", headers=viewer_headers).status_code == 403
+    assert client.delete(f"/assets/{asset['id']}", headers=admin_headers).status_code == 204
+    assert client.get(f"/assets/{asset['id']}", headers=admin_headers).status_code == 404
+
+
+def test_deleting_tour_removes_its_files_from_storage(client, admin_headers, tour_id, fake_storage, monkeypatch):
+    removed = []
+    monkeypatch.setattr(main.storage, "delete_file", lambda key: removed.append(key))
+    client.post(f"/tours/{tour_id}/assets", files={"file": ("scan.ply", b"ply")}, headers=admin_headers)
+
+    assert client.delete(f"/tours/{tour_id}", headers=admin_headers).status_code == 200
+    assert removed == fake_storage  # the same key that was uploaded

@@ -1,9 +1,19 @@
 {
   "CORSRules": [
     {
-      "AllowedOrigins": ["http://localhost:8001", "http://127.0.0.1:8001", "http://51.24.118.98:8001"],
-      "AllowedMethods": ["GET"],
-      "AllowedHeaders": ["*"],
+      "AllowedOrigins": [
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+        "http://localhost:8001",
+        "http://127.0.0.1:8001",
+        "http://51.24.118.98:8001"
+      ],
+      "AllowedMethods": [
+        "GET"
+      ],
+      "AllowedHeaders": [
+        "*"
+      ],
       "MaxAgeSeconds": 3600
     }
   ]

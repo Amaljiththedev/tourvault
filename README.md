@@ -33,13 +33,14 @@ flowchart LR
 | Area | Details |
 |---|---|
 | Tours | Create, read, update, delete; pagination (`limit` 1 to 100, `offset`); filter by hospital. Updates must send the `version` they read, so concurrent edits get a 409 instead of silently overwriting each other |
-| Auth | Register, login with bcrypt-hashed passwords, JWT access tokens (30 min expiry) |
+| Auth | Register and log in with bcrypt-hashed passwords; JWT access tokens (30 min expiry). Passwords must be 8 characters to 72 bytes and not blank; an empty password never logs in. Emails are case-insensitive. `GET /me` returns the logged-in user |
 | Roles | Viewers can read; only admins can create, update, delete or upload. 401 if not logged in, 403 if not allowed |
 | Audit log | Every admin create, update and delete records who did it, to which tour, and when, in the same transaction as the change |
 | 3D assets | Upload `.glb` / `.ply` (type and size checked), stored under random UUID keys, downloaded through 10-minute presigned links. Oversized uploads are refused from their `Content-Length` before the body is read |
-| Processing | A background job reads only the start of each file (HTTP range request) and moves the asset from `uploaded` to `processing` to `ready` or `failed`. PLY: parses the text header. GLB: checks the binary header, compares its declared length with the uploaded size (catches truncated files), and counts vertices from the JSON chunk |
+| Processing | Admins can retry a failed file (`POST /assets/{id}/reprocess`) or delete one (`DELETE /assets/{id}`, also removes it from storage). Files left half-processed by a restart are picked up again at startup. A background job reads only the start of each file (HTTP range request) and moves the asset from `uploaded` to `processing` to `ready` or `failed`. PLY: parses the text header. GLB: checks the binary header, compares its declared length with the uploaded size (catches truncated files), and counts vertices from the JSON chunk |
 | Legacy migration | `/legacy/tours` reproduces the old PHP `/tours.php` JSON exactly, but with parameterised SQL |
-| Demo frontend | `/app/`: log in, list tours, upload, watch processing status, and view `.glb` / `.ply` files in a Three.js viewer loaded straight from storage |
+| Web app | `web/`: Next.js 16 + Redux Toolkit. Log in or register, browse and search tours, create/edit/delete them (admin), drag-and-drop uploads with progress, live processing status, retry/delete files, and a Three.js viewer that loads `.glb` / `.ply` straight from storage |
+| Demo page | `/app/`: the original single-file demo page, kept until the web app is deployed |
 
 ## Running it
 
@@ -49,7 +50,7 @@ Requires Docker. Everything, the API included, runs in containers:
 docker compose up -d --build         # API, PostgreSQL, S3 storage, legacy PHP, nginx router
 ```
 
-- Demo frontend: http://127.0.0.1:8001/app/
+- Demo page: http://127.0.0.1:8001/app/
 - API docs: http://127.0.0.1:8001/docs
 - Through the router: http://localhost:8088/tours.php
 - Storage console: http://localhost:9001/rustfs/console/
@@ -59,6 +60,26 @@ New users register as viewers. To make an admin locally:
 ```bash
 docker compose exec db psql -U postgres -d tourvault -c "UPDATE users SET role = 'admin' WHERE email = 'you@example.com';"
 ```
+
+Sample files to upload are in `samples/`: `hospital.glb` (a hospital building mesh), `ward_scan.ply` (a simulated point-cloud scan of a ward), `cube.glb` and `torus.ply`. `scripts/make_samples.py` regenerates the hospital models from simple shapes.
+
+### Web app (Next.js)
+
+```bash
+cd web
+cp .env.example .env.local           # NEXT_PUBLIC_API_URL=http://localhost:8001
+npm install
+npm run dev                          # http://localhost:3000
+```
+
+The API allows the web app's origin through `CORS_ORIGINS` (default `http://localhost:3000`).
+
+How it fits together:
+
+- `src/store/`: one Redux store with three slices. `authSlice` (token, user, session status), `toursSlice` (list, selection, create/update/delete), `assetsSlice` (files per tour, upload jobs and their progress, which file is in the viewer). Every API call is an async thunk.
+- The token is kept in `localStorage` by a listener middleware, not by the reducers. On page load the app calls `/me` with it: the server decides whether it is still valid, and the role always comes from the server.
+- Any request that comes back 401 ends the session and sends the user to the login page.
+- Uploads use `XMLHttpRequest` for progress events. While any file is `uploaded` or `processing`, the file list polls every 1.5 s until it settles.
 
 For the 3D viewer to load files from local storage, allow the page's origin once:
 
@@ -93,9 +114,12 @@ pip install -r requirements.txt
 python -m pytest
 ```
 
-48 tests run against a separate `tourvault_test` database that is rebuilt from `schema.sql` on every run and emptied before each test, so they never touch development data. They cover:
+65 tests run against a separate `tourvault_test` database that is rebuilt from `schema.sql` on every run and emptied before each test, so they never touch development data. They cover:
 
 - password hashing, registration, login, and the same 401 message for unknown email and wrong password
+- the "email only" login bug: empty, blank, short and over-72-byte passwords are refused; an old account stored with an empty password cannot log in; a 200-character password is a 401, not a 500
+- case-insensitive email, `/me`, and the `/token` form endpoint used by `/docs`
+- processing: stuck assets are resumed, an asset is never processed twice, download is refused until ready, retry and delete are admin-only, deleting a tour removes its files from storage
 - permissions (401 / 403), validation (422), missing resources (404), duplicate email (409)
 - that a user cannot make themselves an admin by sending `"role": "admin"`
 - that SQL injection in the hospital filter is harmless
@@ -122,7 +146,8 @@ python -m pytest
 ## Known limitations and what I would do next
 
 - **Single server, plain HTTP.** Production would put the API behind HTTPS (a load balancer or Caddy with a domain), run it on ECS Fargate with RDS for PostgreSQL, and describe the infrastructure in Terraform.
-- **Background jobs run in the API process** (FastAPI `BackgroundTasks`). A restart loses in-flight jobs. Production would use a queue (for example SQS) with retries.
+- **Background jobs run in the API process** (FastAPI `BackgroundTasks`). A restart drops in-flight jobs; startup re-queues anything left `uploaded` or `processing`, but with several API instances that would need a real queue (for example SQS) with retries.
+- **The web app keeps the token in `localStorage`.** Simple, but readable by any script on the page if there were ever an XSS bug. An httpOnly cookie with CSRF protection is the stronger option.
 - **Uploads pass through the API.** For very large scans, clients should upload straight to S3 with a presigned POST that enforces a size range, so the API never handles the bytes.
 - **GLB processing reads the header, not the geometry.** It validates and counts vertices; it does not yet check the binary buffer or generate thumbnails.
 - **Secrets have local defaults.** The defaults in the code are for local development only; production reads them from the server's `.env`.

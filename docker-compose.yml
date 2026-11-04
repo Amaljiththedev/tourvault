@@ -51,6 +51,8 @@ services:
       S3_SECRET_KEY: minioadmin
       # Local default only. In production SECRET_KEY comes from the environment.
       SECRET_KEY: ${SECRET_KEY:-dev-only-secret-change-me-at-least-32-bytes}
+      # Origins allowed to call the API from a browser (the Next.js app in web/).
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
     depends_on:
       db:
         condition: service_healthy
