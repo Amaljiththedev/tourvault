@@ -37,7 +37,10 @@ flowchart LR
 | Roles | Viewers can read; only admins can create, update, delete or upload. 401 if not logged in, 403 if not allowed |
 | Audit log | Every admin create, update and delete records who did it, to which tour, and when, in the same transaction as the change |
 | 3D assets | Upload `.glb` / `.ply` (type and size checked), stored under random UUID keys, downloaded through 10-minute presigned links. Oversized uploads are refused from their `Content-Length` before the body is read |
+| 360 scan points | Upload a `.zip` of six square cube-map faces, the format capture platforms such as Matterport serve their scans in. Faces may be named `face0`..`face5` (Matterport order: 0 up, 1 front, 2 right, 3 back, 4 left, 5 down) or `front`/`back`/`left`/`right`/`up`/`down`. Processing checks the zip (no unsafe paths, every face present, real JPG/PNG, square, equal sizes) and stores each face unchanged; the download returns one presigned link per face and the viewer draws them on the inside of a cube you can look around in |
+| Moving between scan points | A scan point can be placed in the tour with a `point.json` in its zip, `{"position": [x, y, z], "heading": degrees}` (metres, y up; heading turns the cube about the vertical, counter-clockwise from above), or later with `PUT /assets/{id}/placement` (admin). The viewer then draws a circle on the floor for every other placed point within 25 m; clicking one moves there and keeps the direction you are facing. Previous/next buttons step through a tour's scan points whether or not they are placed. For a Matterport sweep, heading = `rotation.y - 180`, checked against Matterport's own player |
 | Processing | Admins can retry a failed file (`POST /assets/{id}/reprocess`) or delete one (`DELETE /assets/{id}`, also removes it from storage). Files left half-processed by a restart are picked up again at startup. A background job reads only the start of each file (HTTP range request) and moves the asset from `uploaded` to `processing` to `ready` or `failed`. PLY: parses the text header. GLB: checks the binary header, compares its declared length with the uploaded size (catches truncated files), and counts vertices from the JSON chunk |
+| Admin API | `GET /admin/stats` (counts of tours, files, scan points, failed or processing files, storage, users), `GET /admin/tours` (every tour with file counts and size), `GET /admin/users`, `PUT /admin/users/{id}/role`, `DELETE /admin/users/{id}`, `GET /admin/activity?limit=` (1 to 200). All admin only. Role changes and deletes refuse (409) your own account and the last admin, under a table lock so two admins cannot demote each other at once; a user with uploads or activity on record cannot be deleted, only made a viewer |
 | Legacy migration | `/legacy/tours` reproduces the old PHP `/tours.php` JSON exactly, but with parameterised SQL |
 | Web app | `web/`: Next.js 16 + Redux Toolkit. Log in or register, browse and search tours, create/edit/delete them (admin), drag-and-drop uploads with progress, live processing status, retry/delete files, and a Three.js viewer that loads `.glb` / `.ply` straight from storage |
 | Demo page | `/app/`: the original single-file demo page, kept until the web app is deployed |
@@ -63,6 +66,8 @@ docker compose exec db psql -U postgres -d tourvault -c "UPDATE users SET role =
 
 Sample files to upload are in `samples/`: `hospital.glb` (a hospital building mesh), `ward_scan.ply` (a simulated point-cloud scan of a ward), `cube.glb` and `torus.ply`. `scripts/make_samples.py` regenerates the hospital models from simple shapes.
 
+`samples/alderhey-local/` (git-ignored) holds three scan points taken from the public Alder Hey tour's Matterport tiles, for local testing only. They are third-party content: do not commit them or upload them to a shared or public deployment. Databases created before 360 support get the new `kind`, `face_keys`, `face_size`, `position` and `heading` columns automatically at API startup. Each sample zip includes the sweep's position and heading from the Matterport SDK, so the three points link up.
+
 ### Web app (Next.js)
 
 ```bash
@@ -80,6 +85,16 @@ How it fits together:
 - The token is kept in `localStorage` by a listener middleware, not by the reducers. On page load the app calls `/me` with it: the server decides whether it is still valid, and the role always comes from the server.
 - Any request that comes back 401 ends the session and sends the user to the login page.
 - Uploads use `XMLHttpRequest` for progress events. While any file is `uploaded` or `processing`, the file list polls every 1.5 s until it settles.
+
+Admin portal (`/admin`, linked from the header for admins; viewers see a refusal, and the server checks every call anyway):
+
+- Overview: stat cards, a warning when files failed or are still processing, recent activity.
+- Tours: search, file counts and size per tour, publish/unpublish, edit, delete, and a Files button that opens the upload page for that tour.
+- Uploads & scan points: pick a tour, then build a 360 scan point from six images. Drop them all and they are assigned by name (`face0`..`face5` or `front`/`up`/...), or click a square in the cube net to set one face. It checks that all six are there, square and the same size, takes an optional position and heading, and zips them in the browser (`src/lib/zip.ts`, stored entries plus a `point.json`) in the same format the server already accepts. Below that are the usual file list and a placement table with a top-down map, to place or move points after upload.
+- Users: change roles and delete users, with the same rules as the API.
+- Activity: the audit log, filterable by action.
+
+`adminSlice` holds the portal's data; pages wait until the session is restored and known to be an admin before loading it.
 
 For the 3D viewer to load files from local storage, allow the page's origin once:
 

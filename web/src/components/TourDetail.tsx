@@ -1,15 +1,18 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { formatDate } from "@/lib/format";
-import type { Tour } from "@/lib/types";
+import type { Asset, Tour } from "@/lib/types";
+import { viewAsset } from "@/store/assetsSlice";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { deleteTour } from "@/store/toursSlice";
 import AssetPanel from "./AssetPanel";
 import { ConfirmDialog } from "./Dialog";
 import StatusBadge from "./StatusBadge";
 import { Button, Card, Spinner } from "./ui";
+
+const EMPTY: Asset[] = [];
 
 // three.js needs WebGL and `window`, so the viewer is only rendered in the browser.
 const ModelViewer = dynamic(() => import("./ModelViewer"), {
@@ -24,10 +27,11 @@ const ModelViewer = dynamic(() => import("./ModelViewer"), {
 export default function TourDetail({ tour, onEdit }: { tour: Tour; onEdit: () => void }) {
   const dispatch = useAppDispatch();
   const isAdmin = useAppSelector((s) => s.auth.user?.role === "admin");
-  const viewing = useAppSelector((s) => {
-    const id = s.assets.viewingId;
-    return id === null ? null : (s.assets.byTour[tour.id] ?? []).find((a) => a.id === id) ?? null;
-  });
+  const assets = useAppSelector((s) => s.assets.byTour[tour.id] ?? EMPTY);
+  const viewingId = useAppSelector((s) => s.assets.viewingId);
+  const viewing = assets.find((a) => a.id === viewingId) ?? null;
+  // The 360 scan points you can move between, in upload order.
+  const points = useMemo(() => assets.filter((a) => a.kind === "panorama" && a.status === "ready"), [assets]);
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -64,7 +68,7 @@ export default function TourDetail({ tour, onEdit }: { tour: Tour; onEdit: () =>
         </div>
       </Card>
 
-      <ModelViewer asset={viewing} />
+      <ModelViewer asset={viewing} points={points} onSelect={(id) => dispatch(viewAsset(id))} />
 
       <AssetPanel tourId={tour.id} />
 

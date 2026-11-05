@@ -1,6 +1,6 @@
 import { createSlice, nanoid, type PayloadAction } from "@reduxjs/toolkit";
 import { apiFetch, toReject, uploadWithProgress } from "@/lib/api";
-import type { Asset } from "@/lib/types";
+import type { Asset, DownloadLinks } from "@/lib/types";
 import { loggedOut } from "./authSlice";
 import { deleteTour } from "./toursSlice";
 import { createAppAsyncThunk } from "./thunk";
@@ -23,7 +23,8 @@ interface AssetsState {
 
 const initialState: AssetsState = { byTour: {}, loading: {}, uploads: [], error: null, viewingId: null };
 
-export const ALLOWED_EXTENSIONS = [".glb", ".ply"];
+// .zip = a 360 scan point: six cube-map faces (face0..face5 or front/back/...).
+export const ALLOWED_EXTENSIONS = [".glb", ".ply", ".zip"];
 export const MAX_UPLOAD_BYTES = 200 * 1024 * 1024; // must match MAX_UPLOAD_BYTES in app/main.py
 
 export function isUnfinished(asset: Asset): boolean {
@@ -53,7 +54,7 @@ export const uploadAsset = createAppAsyncThunk(
     const dot = file.name.lastIndexOf(".");
     const ext = dot >= 0 ? file.name.slice(dot).toLowerCase() : "";
     let problem: string | null = null;
-    if (!ALLOWED_EXTENSIONS.includes(ext)) problem = "Only .glb and .ply files are allowed";
+    if (!ALLOWED_EXTENSIONS.includes(ext)) problem = "Only .glb, .ply or .zip (360 cube map) files are allowed";
     else if (file.size === 0) problem = "File is empty";
     else if (file.size > MAX_UPLOAD_BYTES) problem = "File exceeds the 200 MB limit";
     if (problem) {
@@ -95,16 +96,36 @@ export const deleteAsset = createAppAsyncThunk("assets/delete", async (asset: As
   }
 });
 
-// A short-lived presigned link straight to storage. Not kept in the store:
-// it expires, so it is fetched each time a model is opened.
-export const getDownloadUrl = createAppAsyncThunk(
-  "assets/downloadUrl",
+// Short-lived presigned links straight to storage (one per face for a
+// panorama). Not kept in the store: they expire, so they are fetched each
+// time a file is opened.
+export const getDownloadLinks = createAppAsyncThunk(
+  "assets/downloadLinks",
   async (assetId: number, { getState, rejectWithValue }) => {
     try {
-      const { url } = await apiFetch<{ url: string }>(`/assets/${assetId}/download`, {
+      return await apiFetch<DownloadLinks>(`/assets/${assetId}/download`, {
         token: getState().auth.token,
       });
-      return url;
+    } catch (error) {
+      return rejectWithValue(toReject(error));
+    }
+  },
+);
+
+// Place a 360 scan point in the tour (or clear it with nulls) so the viewer
+// can show the points around it and move between them.
+export const setPlacement = createAppAsyncThunk(
+  "assets/placement",
+  async (
+    { id, position, heading }: { id: number; position: [number, number, number] | null; heading: number | null },
+    { getState, rejectWithValue },
+  ) => {
+    try {
+      return await apiFetch<Asset>(`/assets/${id}/placement`, {
+        method: "PUT",
+        body: { position, heading },
+        token: getState().auth.token,
+      });
     } catch (error) {
       return rejectWithValue(toReject(error));
     }
@@ -166,6 +187,10 @@ const assetsSlice = createSlice({
       })
       .addCase(uploadAsset.fulfilled, (state, action) => upsert(state, action.payload))
       .addCase(reprocessAsset.fulfilled, (state, action) => upsert(state, action.payload))
+      .addCase(setPlacement.fulfilled, (state, action) => upsert(state, action.payload))
+      .addCase(setPlacement.rejected, (state, action) => {
+        state.error = action.payload?.message ?? "Could not save the placement";
+      })
       .addCase(reprocessAsset.rejected, (state, action) => {
         state.error = action.payload?.message ?? "Could not reprocess the file";
       })

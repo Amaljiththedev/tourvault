@@ -2,6 +2,7 @@ import { configureStore, createListenerMiddleware } from "@reduxjs/toolkit";
 import authReducer, { restoreSession, TOKEN_KEY } from "./authSlice";
 import toursReducer from "./toursSlice";
 import assetsReducer from "./assetsSlice";
+import adminReducer from "./adminSlice";
 
 // Keeps localStorage in step with the token in the store. Side effects live
 // here, not in reducers, so reducers stay pure.
@@ -37,7 +38,7 @@ listener.startListening({
 // state between users. Each browser tab gets its own store.
 export function makeStore() {
   return configureStore({
-    reducer: { auth: authReducer, tours: toursReducer, assets: assetsReducer },
+    reducer: { auth: authReducer, tours: toursReducer, assets: assetsReducer, admin: adminReducer },
     middleware: (getDefault) => getDefault().prepend(listener.middleware),
   });
 }

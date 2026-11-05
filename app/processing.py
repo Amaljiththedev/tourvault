@@ -3,9 +3,11 @@
 Lifecycle of an asset:  uploaded -> processing -> ready | failed
 """
 import json
+import os
 import struct
+from uuid import uuid4
 
-from app import db, storage
+from app import db, panorama, storage
 
 # A GLB file starts with a 12-byte header (magic "glTF", version, total length)
 # followed by the first chunk's 8-byte header (length, type "JSON").
@@ -90,6 +92,29 @@ def glb_vertex_count(asset: dict, start: bytes) -> int:
     return parse_glb_vertex_count(start[GLB_HEADER_BYTES:end])
 
 
+def process_panorama(asset: dict) -> None:
+    """A cube-map zip: check the six faces, then store each one on its own so
+    the browser can fetch them straight from storage. The images are stored
+    exactly as uploaded; nothing is re-encoded."""
+    data = storage.read_all(asset["object_key"])
+    faces, size = panorama.read_cube_faces(data)
+    position, heading = panorama.read_placement(data)
+    prefix = f"tours/{asset['tour_id']}/{uuid4()}"
+    keys = []
+    for face in panorama.FACE_ORDER:
+        data, ext = faces[face]
+        key = f"{prefix}/{face}{ext}"
+        storage.upload_bytes(data, key, panorama.content_type(ext))
+        keys.append(key)
+    old = asset.get("face_keys") or []
+    db.finish_panorama(asset["id"], keys, size, position, heading)
+    for key in old:  # a reprocessed panorama replaces its previous faces
+        try:
+            storage.delete_file(key)
+        except Exception:
+            pass
+
+
 def process_asset(asset_id: int) -> None:
     """Runs in the background after an upload. Never raises: failures are recorded."""
     # Claim the asset first: only one job may move it from 'uploaded' to
@@ -101,14 +126,16 @@ def process_asset(asset_id: int) -> None:
         return
 
     try:
-        header_bytes = storage.read_start(asset["object_key"])
-
-        if asset["object_key"].endswith(".ply"):
-            vertex_count = parse_ply_vertex_count(header_bytes)
+        ext = os.path.splitext(asset["object_key"])[1].lower()
+        if ext == ".zip":
+            process_panorama(asset)
         else:
-            vertex_count = glb_vertex_count(asset, header_bytes)
-
-        db.update_asset_status(asset_id, "ready", vertex_count=vertex_count)
+            header_bytes = storage.read_start(asset["object_key"])
+            if ext == ".ply":
+                vertex_count = parse_ply_vertex_count(header_bytes)
+            else:
+                vertex_count = glb_vertex_count(asset, header_bytes)
+            db.finish_model(asset_id, vertex_count)
 
     except Exception as exc:  # any problem -> mark failed with a readable reason
         db.update_asset_status(asset_id, "failed", error=str(exc)[:500] or type(exc).__name__)

@@ -40,5 +40,10 @@ CREATE TABLE IF NOT EXISTS assets (
     uploaded_by   INTEGER REFERENCES users(id),
     vertex_count  INTEGER,                    -- filled in by background processing
     error         TEXT,                       -- why processing failed, if it did
+    kind          TEXT,                       -- 'model' (a .glb/.ply) or 'panorama' (a 360 cube map)
+    face_keys     TEXT[],                     -- panoramas: the six faces, front right back left up down
+    face_size     INTEGER,                    -- panoramas: width of one square face, in pixels
+    position      DOUBLE PRECISION[],         -- panoramas: where the camera stood, [x, y, z] in metres, y up
+    heading       DOUBLE PRECISION,           -- panoramas: how far the cube is turned about the vertical, degrees
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );

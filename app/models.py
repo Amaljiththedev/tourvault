@@ -94,4 +94,64 @@ class Asset(BaseModel):
     status: str
     vertex_count: int | None = None
     error: str | None = None
+    kind: Literal["model", "panorama"] | None = None
+    face_size: int | None = None
+    position: list[float] | None = None
+    heading: float | None = None
+    created_at: datetime
+
+
+Coordinate = Annotated[float, Field(allow_inf_nan=False, ge=-1_000_000, le=1_000_000)]
+
+
+class AssetPlacement(BaseModel):
+    """Where a 360 scan point sits in the tour, for moving between points.
+    position: [x, y, z] in metres, y up. heading: degrees the cube is turned
+    about the vertical axis (counter-clockwise seen from above)."""
+    position: tuple[Coordinate, Coordinate, Coordinate] | None = None
+    heading: Annotated[float, Field(allow_inf_nan=False, ge=-36_000, le=36_000)] | None = None
+
+
+# ---------- Admin portal ----------
+
+class AdminStats(BaseModel):
+    tours: int
+    published_tours: int
+    files: int
+    scan_points: int
+    models: int
+    processing_files: int
+    failed_files: int
+    storage_bytes: int
+    users: int
+    admins: int
+
+
+class AdminTour(Tour):
+    file_count: int
+    scan_points: int
+    models: int
+    failed_files: int
+    size_bytes: int
+
+
+class AdminUser(BaseModel):
+    id: int
+    email: str  # plain str: older accounts may predate email validation
+    role: Literal["admin", "viewer"]
+    created_at: datetime
+    can_log_in: bool
+
+
+class RoleUpdate(BaseModel):
+    role: Literal["admin", "viewer"]
+
+
+class ActivityEntry(BaseModel):
+    id: int
+    action: Literal["create", "update", "delete"]
+    tour_id: int
+    tour_title: str | None  # None once the tour has been deleted
+    tour_hospital: str | None
+    user_email: str
     created_at: datetime

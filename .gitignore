@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .env
+
+# Third-party Alder Hey / Matterport tiles: local demo only, never commit
+samples/alderhey-local/

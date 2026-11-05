@@ -55,6 +55,15 @@ def upload_file(fileobj, object_key: str, content_type: str | None) -> None:
     s3.upload_fileobj(fileobj, S3_BUCKET, object_key, ExtraArgs=extra)
 
 
+def upload_bytes(data: bytes, object_key: str, content_type: str) -> None:
+    s3.put_object(Bucket=S3_BUCKET, Key=object_key, Body=data, ContentType=content_type)
+
+
+def read_all(object_key: str) -> bytes:
+    """Download a whole file. Only used for cube-map zips, which are small."""
+    return s3.get_object(Bucket=S3_BUCKET, Key=object_key)["Body"].read()
+
+
 def presigned_download_url(object_key: str, expires_seconds: int = 600) -> str:
     """A temporary signed link that lets a client download straight from storage."""
     return s3_public.generate_presigned_url(

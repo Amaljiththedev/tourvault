@@ -10,11 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
-from psycopg.errors import UniqueViolation
+from psycopg.errors import ForeignKeyViolation, UniqueViolation
 
-from app import db, processing, storage
+from app import db, panorama, processing, storage
 from app.auth import ACCESS_TOKEN_MINUTES, authenticate, create_access_token, get_current_user, hash_password, require_admin
-from app.models import Asset, Token, Tour, TourCreate, TourUpdate, UserCreate, UserLogin, UserOut
+from app.models import (
+    ActivityEntry, AdminStats, AdminTour, AdminUser, Asset, AssetPlacement, RoleUpdate,
+    Token, Tour, TourCreate, TourUpdate, UserCreate, UserLogin, UserOut,
+)
 
 log = logging.getLogger("tourvault")
 
@@ -22,6 +25,12 @@ log = logging.getLogger("tourvault")
 # ---------- 1. Create the app ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Add columns an older database is missing (idempotent).
+    if os.getenv("ENSURE_SCHEMA_ON_STARTUP", "1") == "1":
+        try:
+            db.ensure_schema()
+        except Exception:
+            log.exception("Could not update the database schema")
     # Resume assets a previous run left half-processed. Runs in a thread so a
     # slow storage call never delays startup; set RESUME_ASSETS_ON_STARTUP=0 to skip.
     if os.getenv("RESUME_ASSETS_ON_STARTUP", "1") == "1":
@@ -118,7 +127,11 @@ def update_tour(tour_id: int, tour: TourUpdate, admin=Depends(require_admin)):
 def delete_tour(tour_id: int, admin=Depends(require_admin)):
     # Asset rows go with the tour (ON DELETE CASCADE), but their files live in
     # storage, so note the keys first and remove the files once the delete commits.
-    object_keys = [asset["object_key"] for asset in db.list_assets(tour_id)]
+    object_keys = [
+        key
+        for asset in db.list_assets(tour_id)
+        for key in [asset["object_key"], *(asset["face_keys"] or [])]
+    ]
     deleted = db.delete_tour(tour_id, admin["id"])
     for key in object_keys:
         try:
@@ -182,9 +195,10 @@ def me(user=Depends(get_current_user)):
 
 
 # ---------- 8. 3D assets ----------
-ALLOWED_EXTENSIONS = {".glb", ".ply"}
+# .glb / .ply are 3D models. .zip is a 360 scan point: six cube-map faces (see app/panorama.py).
+ALLOWED_EXTENSIONS = {".glb", ".ply", ".zip"}
 # Browsers send no type or a generic one for 3D files, so the server sets it.
-CONTENT_TYPES = {".glb": "model/gltf-binary", ".ply": "application/octet-stream"}
+CONTENT_TYPES = {".glb": "model/gltf-binary", ".ply": "application/octet-stream", ".zip": "application/zip"}
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
 
 
@@ -273,7 +287,12 @@ def download_asset(asset_id: int, user=Depends(get_current_user)):
     # so large 3D files never pass through this API.
     if asset["status"] != "ready":
         raise HTTPException(status_code=409, detail="Asset is not ready yet")
-    return {"url": storage.presigned_download_url(asset["object_key"]), "expires_in_seconds": 600}
+    response = {"url": storage.presigned_download_url(asset["object_key"]), "expires_in_seconds": 600}
+    if asset["kind"] == "panorama":
+        # One signed link per face, in panorama.FACE_ORDER, so the viewer
+        # loads the images straight from storage like any other file.
+        response["faces"] = dict(zip(panorama.FACE_ORDER, (storage.presigned_download_url(k) for k in asset["face_keys"])))
+    return response
 
 
 @app.post("/assets/{asset_id}/reprocess", response_model=Asset)
@@ -288,16 +307,31 @@ def reprocess_asset(asset_id: int, background_tasks: BackgroundTasks, admin=Depe
     return db.get_asset(asset_id)
 
 
+@app.put("/assets/{asset_id}/placement", response_model=Asset)
+def set_asset_placement(asset_id: int, placement: AssetPlacement, admin=Depends(require_admin)):
+    """Place a 360 scan point in the tour (or clear it with nulls), so the
+    viewer can show the other points around it and move between them."""
+    asset = db.get_asset(asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if asset["kind"] != "panorama":
+        raise HTTPException(status_code=409, detail="Only 360 scan points can be placed")
+    position, heading = panorama.check_placement(placement.position, placement.heading)
+    return db.set_placement(asset_id, position, heading)
+
+
 @app.delete("/assets/{asset_id}", status_code=204)
 def delete_asset(asset_id: int, admin=Depends(require_admin)):
     deleted = db.delete_asset(asset_id)
     if deleted is None:
         raise HTTPException(status_code=404, detail="Asset not found")
-    try:
-        storage.delete_file(deleted["object_key"])
-    except Exception:
-        # The metadata is gone either way; an orphaned object costs storage, not correctness.
-        log.exception("Could not delete object %s", deleted["object_key"])
+    # The upload itself and, for a panorama, its six stored faces.
+    for key in [deleted["object_key"], *(deleted["face_keys"] or [])]:
+        try:
+            storage.delete_file(key)
+        except Exception:
+            # The metadata is gone either way; an orphaned object costs storage, not correctness.
+            log.exception("Could not delete object %s", key)
 
 
 
@@ -324,3 +358,57 @@ def legacy_tours(hospital: str | None = None):
         })
 
     return {"count": len(legacy_list), "tours": legacy_list}
+
+
+# ---------- 9. Admin portal ----------
+# Everything here needs an admin. The web app's /admin pages use these.
+
+LAST_ADMIN = "There must always be at least one admin"
+
+
+@app.get("/admin/stats", response_model=AdminStats)
+def admin_stats(admin=Depends(require_admin)):
+    return db.admin_stats()
+
+
+@app.get("/admin/tours", response_model=list[AdminTour])
+def admin_tours(admin=Depends(require_admin)):
+    return db.admin_tours()
+
+
+@app.get("/admin/users", response_model=list[AdminUser])
+def admin_users(admin=Depends(require_admin)):
+    return db.list_users()
+
+
+@app.put("/admin/users/{user_id}/role", response_model=AdminUser)
+def admin_set_role(user_id: int, body: RoleUpdate, admin=Depends(require_admin)):
+    # You cannot change your own role: an admin demoting themself by accident
+    # would lock themself out mid-session.
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=409, detail="You cannot change your own role")
+    try:
+        return db.set_user_role(user_id, body.role)
+    except db.LastAdminError:
+        raise HTTPException(status_code=409, detail=LAST_ADMIN)
+
+
+@app.delete("/admin/users/{user_id}", status_code=204)
+def admin_delete_user(user_id: int, admin=Depends(require_admin)):
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=409, detail="You cannot delete your own account")
+    try:
+        db.delete_user(user_id)
+    except db.LastAdminError:
+        raise HTTPException(status_code=409, detail=LAST_ADMIN)
+    except ForeignKeyViolation:
+        # Their uploads and audit entries must keep pointing at someone.
+        raise HTTPException(
+            status_code=409,
+            detail="This user has uploads or activity on record. Make them a viewer instead.",
+        )
+
+
+@app.get("/admin/activity", response_model=list[ActivityEntry])
+def admin_activity(limit: int = Query(default=50, ge=1, le=200), admin=Depends(require_admin)):
+    return db.list_activity(limit)

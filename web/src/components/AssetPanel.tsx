@@ -61,7 +61,7 @@ export default function AssetPanel({ tourId }: { tourId: number }) {
       <div className="flex items-center justify-between border-b border-line px-5 py-4">
         <div>
           <h3 className="font-semibold">3D files</h3>
-          <p className="text-xs text-muted">GLB models and PLY scans for this tour</p>
+          <p className="text-xs text-muted">GLB models, PLY scans and 360 scan points for this tour</p>
         </div>
         {pending && (
           <span className="flex items-center gap-2 text-xs text-info">
@@ -106,7 +106,7 @@ export default function AssetPanel({ tourId }: { tourId: number }) {
           </div>
         ) : !assets.length && !uploads.length ? (
           <p className="py-6 text-center text-sm text-muted">
-            {isAdmin ? "No files yet. Upload a .glb or .ply file above." : "No 3D files have been added to this tour yet."}
+            {isAdmin ? "No files yet. Upload a .glb, .ply or 360 .zip above." : "No 3D files have been added to this tour yet."}
           </p>
         ) : (
           <ul className="divide-y divide-line overflow-hidden rounded-lg border border-line">
@@ -117,16 +117,22 @@ export default function AssetPanel({ tourId }: { tourId: number }) {
                 <li key={asset.id} className={`flex flex-wrap items-center gap-3 px-4 py-3 ${active ? "bg-brand-50" : ""}`}>
                   <span
                     className={`grid size-9 shrink-0 place-items-center rounded-lg text-[10px] font-bold uppercase ${
-                      asset.filename.toLowerCase().endsWith(".glb") ? "bg-info-bg text-info" : "bg-brand-50 text-brand-700"
+                      asset.kind === "panorama"
+                        ? "bg-warn-bg text-warn"
+                        : asset.filename.toLowerCase().endsWith(".glb")
+                          ? "bg-info-bg text-info"
+                          : "bg-brand-50 text-brand-700"
                     }`}
                   >
-                    {asset.filename.split(".").pop()}
+                    {asset.kind === "panorama" ? "360" : asset.filename.split(".").pop()}
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium">{asset.filename}</p>
                     <p className="text-xs text-muted">
                       {formatBytes(asset.size_bytes)}
-                      {asset.vertex_count != null && ` · ${asset.vertex_count.toLocaleString()} vertices`}
+                      {asset.kind === "panorama" && ` · 360 scan point, ${asset.face_size}px faces`}
+                      {asset.kind === "panorama" && asset.position && " · placed"}
+                      {asset.vertex_count != null &&` · ${asset.vertex_count.toLocaleString()} vertices`}
                       {` · ${formatDate(asset.created_at)}`}
                     </p>
                     {asset.error && <p className="mt-0.5 text-xs text-bad">{asset.error}</p>}
@@ -206,11 +212,11 @@ function Dropzone({ tourId }: { tourId: number }) {
         </button>{" "}
         or drag them here
       </p>
-      <p className="text-xs text-faint">.glb or .ply, up to 200 MB each</p>
+      <p className="text-xs text-faint">.glb or .ply models, or a .zip of six cube faces (a 360 scan point), up to 200 MB</p>
       <input
         ref={inputRef}
         type="file"
-        accept=".glb,.ply"
+        accept=".glb,.ply,.zip"
         multiple
         className="sr-only"
         onChange={(e) => send(e.target.files)}
